@@ -30,7 +30,7 @@ jobs:
 
       - name: Deploy Backend
         run: |
-          set -ex  # 显示所有执行的命令
+          set -ex
           
           echo "=== 开始部署流程 ==="
           
@@ -38,12 +38,6 @@ jobs:
           echo "当前目录: $(pwd)"
           echo "目录结构:"
           ls -la
-          echo ""
-          echo "worker 目录:"
-          ls -la worker/
-          echo ""
-          echo "查找 TypeScript 文件:"
-          find worker/ -name "*.ts" -type f | head -10
           
           # 1. 构建前端（如果需要）
           USE_WORKER_ASSETS="${{ secrets.USE_WORKER_ASSETS }}"
@@ -60,7 +54,6 @@ jobs:
               pnpm build:pages
             fi
             
-            # 验证构建
             echo "前端构建结果:"
             ls -la dist/ || echo "dist 目录不存在"
             cd ..
@@ -90,6 +83,13 @@ jobs:
           echo "使用入口文件: $MAIN_FILE"
           
           # 创建 wrangler.toml
+          cat > wrangler.toml << 'EOF'
+name = "temp-email-worker"
+compatibility_date = "$(date +%Y-%m-%d)"
+main = "$MAIN_FILE"
+EOF
+          
+          # 修复：使用正确的 heredoc 语法
           cat > wrangler.toml << EOF
 name = "temp-email-worker"
 compatibility_date = "$(date +%Y-%m-%d)"
@@ -98,7 +98,7 @@ EOF
           
           # 如果需要 assets，添加配置
           if [ -n "$USE_WORKER_ASSETS" ] && [ "$USE_WORKER_ASSETS" != "false" ] && [ -d "../frontend/dist" ]; then
-            cat >> wrangler.toml << EOF
+            cat >> wrangler.toml << 'EOF'
 
 [assets]
 directory = "../frontend/dist"
@@ -135,24 +135,15 @@ EOF
           echo "=== 验证配置 ==="
           npx wrangler --version
           
-          echo "检查 wrangler 配置:"
-          npx wrangler config 2>&1 || true
-          
-          # 7. 执行部署 - 使用直接命令确保配置被使用
+          # 7. 执行部署
           echo "=== 执行部署 ==="
           
           # 方法1：使用 wrangler.toml
           echo "方法1：使用 wrangler.toml 配置部署"
-          DEPLOY_OUTPUT=$(npx wrangler deploy --minify 2>&1)
-          DEPLOY_EXIT=$?
-          
-          if [ $DEPLOY_EXIT -eq 0 ]; then
+          if npx wrangler deploy --minify; then
             echo "✅ 部署成功！"
-            echo "$DEPLOY_OUTPUT"
           else
-            echo "❌ 方法1失败，退出码: $DEPLOY_EXIT"
-            echo "输出:"
-            echo "$DEPLOY_OUTPUT"
+            echo "❌ 方法1失败，尝试方法2"
             
             # 方法2：直接指定参数
             echo ""
