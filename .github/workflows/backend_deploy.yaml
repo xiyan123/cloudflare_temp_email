@@ -23,54 +23,207 @@ jobs:
         with:
           node-version: 20
 
-      - uses: pnpm/action-setup@v3
-        name: Install pnpm
-        id: pnpm-install
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
         with:
           version: 8
           run_install: false
 
+      - name: Debug Information
+        run: |
+          echo "=== 系统信息 ==="
+          echo "工作目录: $(pwd)"
+          echo "标签: ${{ github.ref_name }}"
+          echo "事件: ${{ github.event_name }}"
+          echo "Git 版本: $(git --version)"
+          echo "Node 版本: $(node --version)"
+          echo "pnpm 版本: $(pnpm --version)"
+
       - name: Deploy Backend for ${{ github.ref_name }}
         run: |
+          set -e  # 遇到错误时退出
+          
+          echo "=== 开始部署流程 ==="
+          
+          # 设置环境变量
           export use_worker_assets=${{ secrets.USE_WORKER_ASSETS }}
           export use_worker_assets_with_telegram=${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}
-          if [ -n "$use_worker_assets" ]; then
-            cd frontend/
-            pnpm install --no-frozen-lockfile
-            if [ -n "$use_worker_assets_with_telegram" ]; then
-              echo "Building with telegram pages"
-              pnpm build:telegram:pages
-            else
-              echo "Building with normal pages"
-              pnpm build:pages
-            fi
-            cd ..
-          fi
-
           export debug_mode=${{ secrets.DEBUG_MODE }}
           export use_mail_wasm_parser=${{ secrets.BACKEND_USE_MAIL_WASM_PARSER }}
-          cd worker/
-          echo '${{ secrets.BACKEND_TOML }}' > wrangler.toml
-          pnpm install --no-frozen-lockfile
-
-          if [ -n "$use_mail_wasm_parser" ]; then
-            echo "Using mail-parser-wasm-worker"
-            pnpm add mail-parser-wasm-worker
-            #git apply --reject ../.github/config/mail-parser-wasm-worker.patch
-            echo "Applied mail-parser-wasm-worker patch"
-          fi
-
-          if [ "$debug_mode" = "true" ]; then
-            pnpm run deploy
+          
+          echo "配置参数:"
+          echo "  USE_WORKER_ASSETS: $use_worker_assets"
+          echo "  USE_WORKER_ASSETS_WITH_TELEGRAM: $use_worker_assets_with_telegram"
+          echo "  DEBUG_MODE: $debug_mode"
+          echo "  BACKEND_USE_MAIL_WASM_PARSER: $use_mail_wasm_parser"
+          
+          # 1. 构建前端资源（如果需要）
+          if [ -n "$use_worker_assets" ]; then
+            echo "=== 构建前端资源 ==="
+            cd frontend/
+            
+            echo "安装前端依赖..."
+            pnpm install --no-frozen-lockfile
+            
+            if [ -n "$use_worker_assets_with_telegram" ]; then
+              echo "构建 Telegram 页面..."
+              pnpm build:telegram:pages
+            else
+              echo "构建普通页面..."
+              pnpm build:pages
+            fi
+            
+            echo "前端构建完成"
+            cd ..
           else
-            output=$(pnpm run deploy 2>&1)
-            if [ $? -ne 0 ]; then
-                code=$?
-                echo "Command failed with exit code $code"
-                exit $code
+            echo "跳过前端构建"
+          fi
+          
+          # 2. 部署后端 Worker
+          echo "=== 部署后端 Worker ==="
+          cd worker/
+          
+          echo "创建 wrangler.toml 配置文件..."
+          echo '${{ secrets.BACKEND_TOML }}' > wrangler.toml
+          
+          # 验证配置文件
+          if [ ! -f "wrangler.toml" ]; then
+            echo "错误：wrangler.toml 文件创建失败"
+            exit 1
+          fi
+          
+          echo "配置文件内容（前20行）:"
+          head -20 wrangler.toml
+          
+          echo "安装后端依赖..."
+          pnpm install --no-frozen-lockfile
+          
+          # 3. 可选的邮件解析器安装
+          if [ -n "$use_mail_wasm_parser" ]; then
+            echo "=== 安装邮件解析器 ==="
+            echo "安装 mail-parser-wasm-worker..."
+            pnpm add mail-parser-wasm-worker
+            
+            echo "应用补丁..."
+            PATCH_FILE="../.github/config/mail-parser-wasm-worker.patch"
+            
+            if [ -f "$PATCH_FILE" ]; then
+              echo "找到补丁文件: $PATCH_FILE"
+              echo "应用补丁..."
+              
+              # 先备份原始文件
+              if [ -f "src/common.ts" ]; then
+                cp src/common.ts src/common.ts.backup
+              fi
+              
+              # 应用补丁
+              if git apply "$PATCH_FILE"; then
+                echo "补丁应用成功"
+              else
+                PATCH_EXIT_CODE=$?
+                echo "补丁应用失败，退出码: $PATCH_EXIT_CODE"
+                echo "尝试使用 patch 命令..."
+                
+                # 安装 patch 工具
+                sudo apt-get update > /dev/null 2>&1
+                sudo apt-get install -y patch > /dev/null 2>&1 || true
+                
+                if command -v patch &> /dev/null; then
+                  if patch -p1 < "$PATCH_FILE"; then
+                    echo "使用 patch 命令成功应用补丁"
+                  else
+                    echo "patch 命令也失败，恢复备份文件..."
+                    if [ -f "src/common.ts.backup" ]; then
+                      mv src/common.ts.backup src/common.ts
+                    fi
+                    echo "跳过补丁应用"
+                  fi
+                else
+                  echo "patch 命令不可用，跳过补丁"
+                fi
+              fi
+            else
+              echo "警告：补丁文件不存在: $PATCH_FILE"
+            fi
+          else
+            echo "跳过邮件解析器安装"
+          fi
+          
+          # 4. 执行部署
+          echo "=== 执行部署 ==="
+          echo "当前目录: $(pwd)"
+          echo "文件列表:"
+          ls -la
+          
+          echo "检查 package.json:"
+          if [ -f "package.json" ]; then
+            echo "package.json 脚本配置:"
+            cat package.json | grep -A10 '"scripts"'
+          fi
+          
+          echo "执行部署命令..."
+          if [ "$debug_mode" = "true" ]; then
+            echo "调试模式：直接执行部署"
+            pnpm run deploy
+            DEPLOY_EXIT_CODE=$?
+          else
+            echo "正常模式：捕获部署输出"
+            
+            # 创建日志文件
+            LOG_FILE="deploy_$(date +%Y%m%d_%H%M%S).log"
+            
+            # 执行部署并记录日志
+            echo "开始部署..." > "$LOG_FILE"
+            pnpm run deploy 2>&1 | tee -a "$LOG_FILE"
+            DEPLOY_EXIT_CODE=${PIPESTATUS[0]}
+            
+            echo "部署退出码: $DEPLOY_EXIT_CODE" >> "$LOG_FILE"
+            
+            if [ $DEPLOY_EXIT_CODE -eq 0 ]; then
+              echo "部署成功！"
+              echo "最后10行输出:"
+              tail -10 "$LOG_FILE"
+            else
+              echo "部署失败，退出码: $DEPLOY_EXIT_CODE"
+              echo "错误详情（最后50行）:"
+              tail -50 "$LOG_FILE"
+              
+              echo "完整的错误日志已保存到: $LOG_FILE"
+              echo "=== 错误日志开始 ==="
+              cat "$LOG_FILE"
+              echo "=== 错误日志结束 ==="
+              
+              # 检查 Cloudflare 认证
+              echo "检查环境变量:"
+              echo "CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:0:10}..."
+              echo "CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:0:10}..."
+              
+              exit $DEPLOY_EXIT_CODE
             fi
           fi
-          echo "Deployed for tag ${{ github.ref_name }}"
+          
+          echo "=== 部署完成 ==="
+          echo "成功部署标签: ${{ github.ref_name }}"
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          NODE_ENV: production
+
+      - name: 上传部署日志（如果失败）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-logs
+          path: |
+            worker/deploy_*.log
+            worker/wrangler.toml
+          retention-days: 7
+
+      - name: 清理工作空间
+        if: always()
+        run: |
+          echo "清理工作空间..."
+          cd worker/
+          rm -f deploy_*.log 2>/dev/null || true
+          rm -f src/common.ts.backup 2>/dev/null || true
+          echo "清理完成"
