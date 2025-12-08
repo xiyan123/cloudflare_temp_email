@@ -15,97 +15,62 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v3
+      - uses: pnpm/action-setup@v3
+        name: Install pnpm
+        id: pnpm-install
         with:
           version: 8
+          run_install: false
 
-      - name: Build frontend
+      - name: Deploy Backend for ${{ github.ref_name }}
         run: |
-          cd frontend/
-          pnpm install --no-frozen-lockfile
-          # 根据配置选择构建类型
-          if [ "${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}" = "true" ]; then
-            pnpm build:telegram:pages
-          else
-            pnpm build:pages
+          export use_worker_assets=${{ secrets.USE_WORKER_ASSETS }}
+          export use_worker_assets_with_telegram=${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}
+          if [ -n "$use_worker_assets" ]; then
+            cd frontend/
+            pnpm install --no-frozen-lockfile
+            if [ -n "$use_worker_assets_with_telegram" ]; then
+              echo "Building with telegram pages"
+              pnpm build:telegram:pages
+            else
+              echo "Building with normal pages"
+              pnpm build:pages
+            fi
+            cd ..
           fi
-          cd ..
 
-      - name: Deploy Worker with nodejs_compat
-        run: |
+          export debug_mode=${{ secrets.DEBUG_MODE }}
+          export use_mail_wasm_parser=${{ secrets.BACKEND_USE_MAIL_WASM_PARSER }}
           cd worker/
-          
-          # 创建完整的 wrangler.toml 配置
-          cat > wrangler.toml << 'EOF'
-name = "mail"
-main = "src/worker.ts"
-compatibility_date = "2025-12-08"
-compatibility_flags = ["nodejs_compat"]
-
-# 路由配置
-routes = [
-  { pattern = "mail-t.tep-mail.org", custom_domain = true },
-]
-
-# 资产配置
-[assets]
-directory = "../frontend/dist/"
-binding = "ASSETS"
-run_worker_first = true
-
-# 邮件发送配置
-send_email = [
-    { name = "SEND_MAIL" },
-]
-
-# 环境变量
-[vars]
-PREFIX = ""
-DOMAINS = ["tep-mail.org"]
-JWT_SECRET = "${{ secrets.JWT_SECRET }}"
-ENABLE_USER_CREATE_EMAIL = true
-ENABLE_USER_DELETE_EMAIL = true
-
-# 数据库配置
-[[d1_databases]]
-binding = "DB"
-database_name = "tep-mail"
-database_id = "b902bde1-607c-4f31-8619-97cae621e7d3"
-EOF
-          
-          echo "=== wrangler.toml 配置 ==="
-          cat wrangler.toml
-          echo "========================="
-          
-          # 安装依赖
+          echo '${{ secrets.BACKEND_TOML }}' > wrangler.toml
           pnpm install --no-frozen-lockfile
-          
-          # 可选：安装邮件解析器
-          if [ "${{ secrets.BACKEND_USE_MAIL_WASM_PARSER }}" = "true" ]; then
-            echo "安装 mail-parser-wasm-worker..."
+
+          if [ -n "$use_mail_wasm_parser" ]; then
+            echo "Using mail-parser-wasm-worker"
             pnpm add mail-parser-wasm-worker
-            # 应用补丁（如果存在）
-            if [ -f "../.github/config/mail-parser-wasm-worker.patch" ]; then
-              echo "应用补丁..."
-              patch -p1 < "../.github/config/mail-parser-wasm-worker.patch" 2>/dev/null || echo "补丁应用失败，继续..."
+            git apply ../.github/config/mail-parser-wasm-worker.patch
+            echo "Applied mail-parser-wasm-worker patch"
+          fi
+
+          if [ "$debug_mode" = "true" ]; then
+            pnpm run deploy
+          else
+            output=$(pnpm run deploy 2>&1)
+            if [ $? -ne 0 ]; then
+                code=$?
+                echo "Command failed with exit code $code"
+                exit $code
             fi
           fi
-          
-          # 执行部署
-          echo "开始部署到 Cloudflare Workers..."
-          npx wrangler deploy --minify
-          
-          echo "🎉 部署成功完成！"
+          echo "Deployed for tag ${{ github.ref_name }}"
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
