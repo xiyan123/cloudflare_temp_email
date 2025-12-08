@@ -15,154 +15,317 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'pnpm'
 
-      - name: Install pnpm
+      - name: Setup pnpm
         uses: pnpm/action-setup@v3
         with:
           version: 8
           run_install: false
 
-      - name: Deploy Backend for ${{ github.ref_name }}
+      - name: Debug environment
         run: |
-          set -e
+          echo "=== 环境信息 ==="
+          echo "工作目录: $(pwd)"
+          echo "标签: ${{ github.ref_name }}"
+          echo "分支: ${{ github.ref }}"
+          echo "事件: ${{ github.event_name }}"
+          echo "Node: $(node --version)"
+          echo "pnpm: $(pnpm --version)"
+          echo "npm: $(npm --version)"
           
-          echo "=== 开始部署流程 ==="
+          echo "项目结构:"
+          ls -la
+          echo ""
+          echo "frontend 目录:"
+          ls -la frontend/ 2>/dev/null || echo "frontend 目录不存在"
+          echo ""
+          echo "worker 目录:"
+          ls -la worker/ 2>/dev/null || echo "worker 目录不存在"
+
+      - name: Build and Deploy
+        run: |
+          set -e  # 任何命令失败则退出
           
-          # 设置环境变量
-          export use_worker_assets=${{ secrets.USE_WORKER_ASSETS }}
-          export use_worker_assets_with_telegram=${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}
-          export debug_mode=${{ secrets.DEBUG_MODE }}
-          export use_mail_wasm_parser=${{ secrets.BACKEND_USE_MAIL_WASM_PARSER }}
+          echo "=== 开始构建和部署流程 ==="
+          
+          # 读取环境变量
+          USE_WORKER_ASSETS="${{ secrets.USE_WORKER_ASSETS }}"
+          USE_WORKER_ASSETS_WITH_TELEGRAM="${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}"
+          DEBUG_MODE="${{ secrets.DEBUG_MODE }}"
+          USE_MAIL_WASM_PARSER="${{ secrets.BACKEND_USE_MAIL_WASM_PARSER }}"
           
           echo "配置参数:"
-          echo "  USE_WORKER_ASSETS: $use_worker_assets"
-          echo "  USE_WORKER_ASSETS_WITH_TELEGRAM: $use_worker_assets_with_telegram"
+          echo "USE_WORKER_ASSETS: ${USE_WORKER_ASSETS:-未设置}"
+          echo "USE_WORKER_ASSETS_WITH_TELEGRAM: ${USE_WORKER_ASSETS_WITH_TELEGRAM:-未设置}"
+          echo "DEBUG_MODE: ${DEBUG_MODE:-未设置}"
+          echo "USE_MAIL_WASM_PARSER: ${USE_MAIL_WASM_PARSER:-未设置}"
           
-          # 1. 构建前端资源（如果需要）
-          if [ -n "$use_worker_assets" ]; then
-            echo "=== 构建前端资源 ==="
+          # ========== 1. 构建前端资源 ==========
+          echo ""
+          echo "=== 步骤1: 构建前端资源 ==="
+          
+          if [ -n "$USE_WORKER_ASSETS" ] && [ "$USE_WORKER_ASSETS" != "false" ]; then
+            echo "前端构建已启用"
+            
+            if [ ! -d "frontend" ]; then
+              echo "❌ 错误: frontend 目录不存在"
+              exit 1
+            fi
+            
             cd frontend/
             
             echo "安装前端依赖..."
             pnpm install --no-frozen-lockfile
             
-            echo "检查构建脚本..."
-            if [ -n "$use_worker_assets_with_telegram" ]; then
-              echo "构建 Telegram 页面..."
+            echo "执行前端构建..."
+            if [ -n "$USE_WORKER_ASSETS_WITH_TELEGRAM" ] && [ "$USE_WORKER_ASSETS_WITH_TELEGRAM" != "false" ]; then
+              echo "构建 Telegram 版本页面"
               pnpm build:telegram:pages
             else
-              echo "构建普通页面..."
+              echo "构建标准页面"
               pnpm build:pages
             fi
             
-            # 验证 dist 目录是否创建
-            echo "验证构建输出..."
-            if [ -d "dist" ]; then
-              echo "✅ dist 目录存在"
-              echo "dist 目录内容:"
-              ls -la dist/
-            else
-              echo "❌ 错误：dist 目录不存在"
+            # 验证构建结果
+            if [ ! -d "dist" ]; then
+              echo "❌ 错误: 前端构建失败，dist 目录不存在"
               echo "当前目录内容:"
               ls -la
-              echo "尝试查找其他输出目录..."
-              find . -type d -name "*dist*" -o -name "*build*" -o -name "*out*"
               exit 1
             fi
+            
+            echo "✅ 前端构建成功"
+            echo "dist 目录内容:"
+            ls -la dist/
             
             cd ..
           else
             echo "跳过前端构建"
-            # 如果不需要前端资源，需要修改配置
           fi
           
-          # 2. 部署后端 Worker
-          echo "=== 部署后端 Worker ==="
-          cd worker/
+          # ========== 2. 准备后端部署 ==========
+          echo ""
+          echo "=== 步骤2: 准备后端部署 ==="
           
-          # 创建 wrangler.toml - 根据是否需要前端资源调整
-          if [ -n "$use_worker_assets" ]; then
-            # 需要前端资源的情况
-            echo "创建带 assets 配置的 wrangler.toml"
-            echo '${{ secrets.BACKEND_TOML }}' > wrangler.toml
-          else
-            # 不需要前端资源的情况
-            echo "创建不带 assets 配置的 wrangler.toml"
-            echo '${{ secrets.BACKEND_TOML_NO_ASSETS }}' > wrangler.toml
-          fi
-          
-          # 验证配置文件
-          if [ ! -f "wrangler.toml" ]; then
-            echo "错误：wrangler.toml 文件创建失败"
+          if [ ! -d "worker" ]; then
+            echo "❌ 错误: worker 目录不存在"
             exit 1
           fi
           
-          echo "配置文件内容:"
-          cat wrangler.toml
+          cd worker/
           
-          # 检查前端 dist 目录是否存在（如果需要）
-          if grep -q "assets" wrangler.toml; then
-            echo "配置中包含 assets，检查前端目录..."
-            DIST_PATH="../frontend/dist"
-            if [ ! -d "$DIST_PATH" ]; then
-              echo "❌ 错误：前端 dist 目录不存在: $DIST_PATH"
-              echo "请检查前端构建是否成功"
-              exit 1
+          # 验证 worker 入口文件
+          echo "检查 worker 入口文件..."
+          if [ -f "src/worker.ts" ]; then
+            echo "✅ 找到 worker 入口: src/worker.ts"
+            ENTRY_POINT="src/worker.ts"
+          elif [ -f "src/index.ts" ]; then
+            echo "✅ 找到 worker 入口: src/index.ts"
+            ENTRY_POINT="src/index.ts"
+          elif [ -f "index.ts" ]; then
+            echo "✅ 找到 worker 入口: index.ts"
+            ENTRY_POINT="index.ts"
+          else
+            echo "❌ 错误: 未找到 worker 入口文件"
+            echo "可用文件:"
+            find . -name "*.ts" -o -name "*.js" | head -20
+            exit 1
+          fi
+          
+          # ========== 3. 创建 wrangler.toml 配置 ==========
+          echo ""
+          echo "=== 步骤3: 创建 wrangler.toml 配置 ==="
+          
+          # 使用模板创建最小化配置
+          cat > wrangler.toml << 'EOL'
+name = "temp-email-worker"
+compatibility_date = "$(date +%Y-%m-%d)"
+EOL
+          
+          # 添加主入口
+          echo "main = \"$ENTRY_POINT\"" >> wrangler.toml
+          
+          # 如果有前端资源，添加 assets 配置
+          if [ -n "$USE_WORKER_ASSETS" ] && [ "$USE_WORKER_ASSETS" != "false" ]; then
+            if [ -d "../frontend/dist" ]; then
+              echo "" >> wrangler.toml
+              echo "[assets]" >> wrangler.toml
+              echo 'directory = "../frontend/dist"' >> wrangler.toml
+              echo 'binding = "ASSETS"' >> wrangler.toml
+              echo "✅ 添加 assets 配置"
             else
-              echo "✅ 前端 dist 目录存在"
+              echo "⚠️  警告: 前端构建已启用，但 ../frontend/dist 不存在"
             fi
           fi
           
-          # 安装依赖
-          echo "安装后端依赖..."
+          # 添加其他必要配置（根据你的需求调整）
+          echo "" >> wrangler.toml
+          echo "[vars]" >> wrangler.toml
+          echo 'DOMAINS = ["tep-mail.org"]' >> wrangler.toml
+          echo 'JWT_SECRET = "${{ secrets.JWT_SECRET }}"' >> wrangler.toml
+          
+          # 显示配置
+          echo "生成的 wrangler.toml 配置:"
+          echo "========================================"
+          cat wrangler.toml
+          echo "========================================"
+          
+          # ========== 4. 安装后端依赖 ==========
+          echo ""
+          echo "=== 步骤4: 安装后端依赖 ==="
+          
+          echo "安装 pnpm 依赖..."
           pnpm install --no-frozen-lockfile
           
-          # 3. 可选的邮件解析器安装
-          if [ -n "$use_mail_wasm_parser" ]; then
-            echo "Using mail-parser-wasm-worker"
+          # 检查 wrangler 是否安装
+          if [ ! -f "node_modules/.bin/wrangler" ]; then
+            echo "wrangler 未找到，尝试安装..."
+            pnpm add -D wrangler
+          fi
+          
+          # ========== 5. 可选的邮件解析器 ==========
+          echo ""
+          echo "=== 步骤5: 可选组件安装 ==="
+          
+          if [ -n "$USE_MAIL_WASM_PARSER" ] && [ "$USE_MAIL_WASM_PARSER" != "false" ]; then
+            echo "安装 mail-parser-wasm-worker..."
             pnpm add mail-parser-wasm-worker
             
-            # 应用补丁
+            # 应用补丁（如果存在）
             PATCH_FILE="../.github/config/mail-parser-wasm-worker.patch"
             if [ -f "$PATCH_FILE" ]; then
-              echo "应用补丁..."
-              # 使用 patch 命令
-              if command -v patch &> /dev/null || (sudo apt-get update && sudo apt-get install -y patch); then
-                patch -p1 < "$PATCH_FILE" 2>/dev/null || echo "补丁应用可能失败，继续..."
+              echo "应用补丁文件..."
+              if command -v patch >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y patch); then
+                patch -p1 < "$PATCH_FILE" 2>/dev/null && echo "✅ 补丁应用成功" || echo "⚠️  补丁应用失败，继续..."
+              else
+                echo "⚠️  patch 命令不可用，跳过补丁"
+              fi
+            else
+              echo "⚠️  补丁文件不存在: $PATCH_FILE"
+            fi
+          else
+            echo "跳过邮件解析器安装"
+          fi
+          
+          # ========== 6. 验证配置 ==========
+          echo ""
+          echo "=== 步骤6: 验证配置 ==="
+          
+          echo "检查文件路径:"
+          echo "Worker 入口: $(pwd)/$ENTRY_POINT"
+          [ -f "$ENTRY_POINT" ] && echo "✅ 入口文件存在" || echo "❌ 入口文件不存在"
+          
+          if [ -n "$USE_WORKER_ASSETS" ] && [ "$USE_WORKER_ASSETS" != "false" ]; then
+            echo "Assets 目录: $(pwd)/../frontend/dist"
+            [ -d "../frontend/dist" ] && echo "✅ assets 目录存在" || echo "❌ assets 目录不存在"
+          fi
+          
+          echo "检查 wrangler 版本:"
+          npx wrangler --version
+          
+          # ========== 7. 执行部署 ==========
+          echo ""
+          echo "=== 步骤7: 执行部署 ==="
+          
+          echo "开始部署到 Cloudflare Workers..."
+          
+          # 设置部署命令
+          DEPLOY_CMD="npx wrangler deploy"
+          
+          # 根据调试模式调整
+          if [ "$DEBUG_MODE" = "true" ]; then
+            echo "🔧 调试模式启用"
+            DEPLOY_CMD="$DEPLOY_CMD --verbose"
+          else
+            DEPLOY_CMD="$DEPLOY_CMD --minify"
+          fi
+          
+          # 执行部署
+          echo "执行命令: $DEPLOY_CMD"
+          
+          # 设置重试机制
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          DEPLOY_SUCCESS=false
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$DEPLOY_SUCCESS" = false ]; do
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo ""
+            echo "部署尝试 #$RETRY_CONT"
+            
+            if eval $DEPLOY_CMD; then
+              DEPLOY_SUCCESS=true
+              echo "✅ 部署成功！"
+            else
+              DEPLOY_EXIT_CODE=$?
+              echo "❌ 部署失败，退出码: $DEPLOY_EXIT_CODE"
+              
+              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                echo "等待 5 秒后重试..."
+                sleep 5
+                
+                # 尝试不同的部署方式
+                echo "尝试备用部署方案..."
+                if [ $RETRY_COUNT -eq 2 ]; then
+                  echo "尝试直接指定入口点部署..."
+                  npx wrangler deploy "$ENTRY_POINT" --minify && DEPLOY_SUCCESS=true || continue
+                fi
               fi
             fi
-          fi
+          done
           
-          # 4. 执行部署
-          echo "=== 执行部署 ==="
-          
-          # 检查 wrangler 配置
-          echo "检查 wrangler 配置..."
-          if [ -f "node_modules/.bin/wrangler" ]; then
-            chmod +x node_modules/.bin/wrangler
-            ./node_modules/.bin/wrangler --version
+          # 检查最终结果
+          if [ "$DEPLOY_SUCCESS" = true ]; then
+            echo ""
+            echo "🎉 部署完成！"
+            echo "Worker 名称: temp-email-worker"
+            echo "部署标签: ${{ github.ref_name }}"
+            echo "时间: $(date)"
           else
-            npx wrangler --version
+            echo ""
+            echo "💥 部署失败，已尝试 $MAX_RETRIES 次"
+            echo "请检查:"
+            echo "1. Cloudflare 账户和 Token 是否正确"
+            echo "2. wrangler.toml 配置是否正确"
+            echo "3. 网络连接是否正常"
+            echo "4. 项目文件结构是否正确"
+            exit 1
           fi
           
-          echo "开始部署到 Cloudflare..."
+          # ========== 8. 清理 ==========
+          echo ""
+          echo "=== 步骤8: 清理 ==="
           
-          # 使用适当的部署命令
-          if [ -f "node_modules/.bin/wrangler" ]; then
-            ./node_modules/.bin/wrangler deploy --minify
-          else
-            npx wrangler deploy --minify
-          fi
+          # 移除敏感信息（可选）
+          rm -f wrangler.toml 2>/dev/null || true
           
-          echo "✅ 部署成功！"
-          echo "Deployed for tag ${{ github.ref_name }}"
+          echo "✅ 所有步骤完成"
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-logs
+          path: |
+            worker/wrangler.toml
+            **/*.log
+          retention-days: 7
+
+      - name: Success notification
+        if: success()
+        run: |
+          echo "✅ 后端部署成功完成！"
+          echo "标签: ${{ github.ref_name }}"
+          echo "时间: $(date)"
