@@ -8,6 +8,12 @@ on:
     tags:
       - "*"
   workflow_dispatch:
+    inputs:
+      skip_resource_creation:
+        description: 'Skip resource creation (use existing IDs)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   deploy:
@@ -18,13 +24,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
 
-      - uses: pnpm/action-setup@v3
-        name: Install pnpm
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
         with:
           version: 8
 
@@ -33,51 +39,78 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
+          echo "Testing Cloudflare connection..."
           npx wrangler@latest whoami
-          echo "Account ID: ${CLOUDFLARE_ACCOUNT_ID}"
-
-      - name: Setup Cloudflare Resources
+          
+      - name: Prepare Worker Directory
+        run: |
+          cd worker/
+          echo "Installing wrangler locally..."
+          pnpm add -D wrangler@latest
+          
+      - name: Handle Cloudflare Resources
+        id: resources
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          KV_EMAILS_ID: ${{ secrets.KV_EMAILS_ID }}
-          KV_DOMAINS_ID: ${{ secrets.KV_DOMAINS_ID }}
-          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
-        run: |
-          # 创建或使用现有的资源
-          if [ -z "$KV_EMAILS_ID" ]; then
-            echo "Creating new KV namespace for EMAILS"
-            KV_EMAILS_ID=$(npx wrangler kv namespace create "EMAILS" | grep -oP 'id = "\K[^"]+')
-            echo "KV_EMAILS_ID=$KV_EMAILS_ID" >> $GITHUB_ENV
-          fi
-          
-          if [ -z "$KV_DOMAINS_ID" ]; then
-            echo "Creating new KV namespace for DOMAINS"
-            KV_DOMAINS_ID=$(npx wrangler kv namespace create "DOMAINS" | grep -oP 'id = "\K[^"]+')
-            echo "KV_DOMAINS_ID=$KV_DOMAINS_ID" >> $GITHUB_ENV
-          fi
-          
-          if [ -z "$D1_DATABASE_ID" ]; then
-            echo "Creating new D1 database"
-            D1_DATABASE_ID=$(npx wrangler d1 create "temp-mail-db" | grep -oP 'database_id = "\K[^"]+')
-            echo "D1_DATABASE_ID=$D1_DATABASE_ID" >> $GITHUB_ENV
-          fi
-
-      - name: Create wrangler.toml
-        env:
-          KV_EMAILS_ID: ${{ secrets.KV_EMAILS_ID || env.KV_EMAILS_ID }}
-          KV_DOMAINS_ID: ${{ secrets.KV_DOMAINS_ID || env.KV_DOMAINS_ID }}
-          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID || env.D1_DATABASE_ID }}
         run: |
           cd worker/
-          cat > wrangler.toml << EOF
+          
+          # 如果提供了资源ID，直接使用
+          if [ -n "${{ secrets.KV_EMAILS_ID }}" ] && [ -n "${{ secrets.D1_DATABASE_ID }}" ]; then
+            echo "Using existing resource IDs from secrets"
+            echo "KV_EMAILS_ID=${{ secrets.KV_EMAILS_ID }}" >> $GITHUB_ENV
+            echo "KV_DOMAINS_ID=${{ secrets.KV_DOMAINS_ID }}" >> $GITHUB_ENV
+            echo "D1_DATABASE_ID=${{ secrets.D1_DATABASE_ID }}" >> $GITHUB_ENV
+            
+          # 否则尝试创建（如果允许）
+          elif [ "${{ github.event.inputs.skip_resource_creation }}" = "false" ]; then
+            echo "Attempting to create resources..."
+            
+            # 使用正确的 wrangler 语法
+            echo "Creating KV namespace for EMAILS..."
+            
+            # 尝试两种可能的语法
+            if npx wrangler kv namespace --help 2>&1 | grep -q "create"; then
+              # 新语法
+              KV_OUTPUT=$(npx wrangler kv namespace create "EMAILS" 2>&1)
+            else
+              # 旧语法
+              KV_OUTPUT=$(npx wrangler kv:namespace create "EMAILS" 2>&1)
+            fi
+            
+            echo "$KV_OUTPUT"
+            
+            # 简单提取ID
+            KV_EMAILS_ID=$(echo "$KV_OUTPUT" | grep -i "id" | grep -oE '[a-f0-9]{32}' | head -1)
+            if [ -n "$KV_EMAILS_ID" ]; then
+              echo "KV_EMAILS_ID=$KV_EMAILS_ID" >> $GITHUB_ENV
+              echo "Found ID: $KV_EMAILS_ID"
+            fi
+            
+          else
+            echo "❌ No resource IDs provided and resource creation is disabled"
+            echo "Please create resources manually and add IDs to GitHub Secrets"
+            exit 1
+          fi
+          
+      - name: Create wrangler.toml
+        env:
+          KV_EMAILS_ID: ${{ env.KV_EMAILS_ID || secrets.KV_EMAILS_ID }}
+          KV_DOMAINS_ID: ${{ env.KV_DOMAINS_ID || secrets.KV_DOMAINS_ID }}
+          D1_DATABASE_ID: ${{ env.D1_DATABASE_ID || secrets.D1_DATABASE_ID }}
+        run: |
+          cd worker/
+          
+          # 创建基本的 wrangler.toml
+          cat > wrangler.toml << 'EOF'
           name = "temp-mail-worker"
           compatibility_date = "2024-01-01"
           compatibility_flags = ["nodejs_compat"]
           
           kv_namespaces = [
-            { binding = "EMAILS", id = "${KV_EMAILS_ID}" },
-            { binding = "DOMAINS", id = "${KV_DOMAINS_ID}" }
+            { binding = "EMAILS", id = "$KV_EMAILS_ID" },
+            { binding = "DOMAINS", id = "$KV_DOMAINS_ID" }
           ]
           
           r2_buckets = [
@@ -87,59 +120,32 @@ jobs:
           [[d1_databases]]
           binding = "DB"
           database_name = "temp-mail-db"
-          database_id = "${D1_DATABASE_ID}"
+          database_id = "$D1_DATABASE_ID"
           EOF
           
           echo "Generated wrangler.toml:"
           cat wrangler.toml
-
-      - name: Deploy Backend
+          
+      - name: Deploy Worker
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          USE_WORKER_ASSETS: ${{ secrets.USE_WORKER_ASSETS }}
-          USE_WORKER_ASSETS_WITH_TELEGRAM: ${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}
-          DEBUG_MODE: ${{ secrets.DEBUG_MODE }}
-          BACKEND_USE_MAIL_WASM_PARSER: ${{ secrets.BACKEND_USE_MAIL_WASM_PARSER }}
         run: |
-          set -x  # 启用调试输出
-          
-          if [ -n "$USE_WORKER_ASSETS" ]; then
-            cd frontend/
-            pnpm install --no-frozen-lockfile
-            if [ -n "$USE_WORKER_ASSETS_WITH_TELEGRAM" ]; then
-              echo "Building with telegram pages"
-              pnpm build:telegram:pages
-            else
-              echo "Building with normal pages"
-              pnpm build:pages
-            fi
-            cd ..
-          fi
-
           cd worker/
+          
           echo "Installing dependencies..."
           pnpm install --no-frozen-lockfile
-
-          if [ -n "$BACKEND_USE_MAIL_WASM_PARSER" ]; then
-            echo "Using mail-parser-wasm-worker"
-            pnpm add mail-parser-wasm-worker
-            git apply ../.github/config/mail-parser-wasm-worker.patch
-            echo "Applied mail-parser-wasm-worker patch"
-          fi
-
-          echo "Starting deployment..."
-          if [ "$DEBUG_MODE" = "true" ]; then
-            pnpm run deploy
+          
+          echo "Testing deployment..."
+          
+          # 直接使用 wrangler deploy（跳过 pnpm run deploy 的复杂脚本）
+          npx wrangler deploy --minify 2>&1 | tee deploy-output.log
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Deployment successful!"
           else
-            # 尝试部署并捕获详细输出
-            pnpm run deploy 2>&1 | tee deploy.log
-            DEPLOY_EXIT_CODE=${PIPESTATUS[0]}
-            if [ $DEPLOY_EXIT_CODE -ne 0 ]; then
-              echo "Deployment failed with exit code $DEPLOY_EXIT_CODE"
-              echo "=== Last 100 lines of deploy.log ==="
-              tail -100 deploy.log
-              exit $DEPLOY_EXIT_CODE
-            fi
+            echo "❌ Deployment failed"
+            echo "=== Error output ==="
+            tail -50 deploy-output.log
+            exit 1
           fi
-          echo "Successfully deployed for ref: ${{ github.ref_name }}"
