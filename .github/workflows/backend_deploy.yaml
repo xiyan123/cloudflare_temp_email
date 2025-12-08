@@ -1,46 +1,76 @@
-name = "mail"
-main = "src/worker.ts"
-compatibility_date = "2025-12-01"
-compatibility_flags = [ "nodejs_compat" ]
+name: Deploy Backend
 
-# 如果你想使用自定义域名，你需要添加 routes 配置
-routes = [
-  { pattern = "mail-t.tep-mail.org", custom_domain = true },
- ]
+on:
+  workflow_run:
+    workflows: [Upstream Sync]
+    types: [completed]
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
 
-# 如果你想要部署带有前端资源的 worker, 你需要添加 assets 配置
-#[assets]
- #directory = "../frontend/dist/"
- #binding = "ASSETS"
- #run_worker_first = true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-# 如果你想要使用定时任务清理邮件，取消下面的注释，并修改 cron 表达式
-# [triggers]
-# crons = [ "0 0 * * *" ]
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-# 通过 Cloudflare 发送邮件
-send_email = [
-    { name = "SEND_MAIL" },
-]
+      - uses: pnpm/action-setup@v3
+        name: Install pnpm
+        id: pnpm-install
+        with:
+          version: 8
+          run_install: false
 
-[vars]
-# 邮箱名称前缀，不需要后缀可配置为空字符串或者不配置
-PREFIX = ""
-# 用于临时邮箱的所有域名, 支持多个域名
-DOMAINS = ["tep-mail.org"]
-# 用于生成 jwt 的密钥, jwt 用于给用户登录以及鉴权
-JWT_SECRET = "xiyan219xiyansakura"
+      - name: Deploy Backend for ${{ github.ref_name }}
+        run: |
+          export use_worker_assets=${{ secrets.USE_WORKER_ASSETS }}
+          export use_worker_assets_with_telegram=${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}
+          if [ -n "$use_worker_assets" ]; then
+            cd frontend/
+            pnpm install --no-frozen-lockfile
+            if [ -n "$use_worker_assets_with_telegram" ]; then
+              echo "Building with telegram pages"
+              pnpm build:telegram:pages
+            else
+              echo "Building with normal pages"
+              pnpm build:pages
+            fi
+            cd ..
+          fi
 
-# admin 控制台密码, 不配置则不允许访问控制台
-# ADMIN_PASSWORDS = ["xiyan219...", "sakura0.0"]
+          export debug_mode=${{ secrets.DEBUG_MODE }}
+          export use_mail_wasm_parser=${{ secrets.BACKEND_USE_MAIL_WASM_PARSER }}
+          cd worker/
+          echo '${{ secrets.BACKEND_TOML }}' > wrangler.toml
+          pnpm install --no-frozen-lockfile
 
-# 是否允许用户创建邮件, 不配置则不允许
-ENABLE_USER_CREATE_EMAIL = true
-# 允许用户删除邮件, 不配置则不允许
-ENABLE_USER_DELETE_EMAIL = true
+          if [ -n "$use_mail_wasm_parser" ]; then
+            echo "Using mail-parser-wasm-worker"
+            pnpm add mail-parser-wasm-worker
+            git apply ../.github/config/mail-parser-wasm-worker.patch
+            echo "Applied mail-parser-wasm-worker patch"
+          fi
 
-# D1 数据库的名称和 ID 可以在 cloudflare 控制台查看
-[[d1_databases]]
-binding = "DB"
-database_name = "tep-mail" # D1 数据库名称
-database_id = "b902bde1-607c-4f31-8619-97cae621e7d3" # D1 数据库 ID
+          if [ "$debug_mode" = "true" ]; then
+            pnpm run deploy
+          else
+            output=$(pnpm run deploy 2>&1)
+            if [ $? -ne 0 ]; then
+                code=$?
+                echo "Command failed with exit code $code"
+                exit $code
+            fi
+          fi
+          echo "Deployed for tag ${{ github.ref_name }}"
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
