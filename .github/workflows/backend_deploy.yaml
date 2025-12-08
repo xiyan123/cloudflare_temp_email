@@ -28,142 +28,53 @@ jobs:
         with:
           version: 8
 
-      - name: Deploy Backend
+      - name: Build frontend if needed
         run: |
-          set -ex
-          
-          echo "=== 开始部署流程 ==="
-          
-          # 0. 显示当前目录结构
-          echo "当前目录: $(pwd)"
-          echo "目录结构:"
-          ls -la
-          
-          # 1. 构建前端（如果需要）
-          USE_WORKER_ASSETS="${{ secrets.USE_WORKER_ASSETS }}"
-          USE_WORKER_ASSETS_WITH_TELEGRAM="${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}"
-          
-          if [ -n "$USE_WORKER_ASSETS" ] && [ "$USE_WORKER_ASSETS" != "false" ]; then
-            echo "=== 构建前端 ==="
+          if [ "${{ secrets.USE_WORKER_ASSETS }}" = "true" ]; then
             cd frontend/
             pnpm install --no-frozen-lockfile
-            
-            if [ -n "$USE_WORKER_ASSETS_WITH_TELEGRAM" ] && [ "$USE_WORKER_ASSETS_WITH_TELEGRAM" != "false" ]; then
+            if [ "${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}" = "true" ]; then
               pnpm build:telegram:pages
             else
               pnpm build:pages
             fi
-            
-            echo "前端构建结果:"
-            ls -la dist/ || echo "dist 目录不存在"
             cd ..
           fi
-          
-          # 2. 进入 worker 目录
-          echo "=== 进入 worker 目录 ==="
-          cd worker/
-          echo "当前目录: $(pwd)"
-          
-          # 3. 创建正确的 wrangler.toml
-          echo "=== 创建 wrangler.toml ==="
-          
-          # 确定入口文件
-          if [ -f "src/worker.ts" ]; then
-            MAIN_FILE="src/worker.ts"
-          elif [ -f "src/index.ts" ]; then
-            MAIN_FILE="src/index.ts"
-          elif [ -f "index.ts" ]; then
-            MAIN_FILE="index.ts"
-          else
-            echo "❌ 错误：找不到入口文件"
-            find . -name "*.ts" -type f
-            exit 1
-          fi
-          
-          echo "使用入口文件: $MAIN_FILE"
-          
-          # 创建 wrangler.toml
-          cat > wrangler.toml << 'EOF'
-name = "temp-email-worker"
-compatibility_date = "$(date +%Y-%m-%d)"
-main = "$MAIN_FILE"
-EOF
-          
-          # 修复：使用正确的 heredoc 语法
-          cat > wrangler.toml << EOF
-name = "temp-email-worker"
-compatibility_date = "$(date +%Y-%m-%d)"
-main = "$MAIN_FILE"
-EOF
-          
-          # 如果需要 assets，添加配置
-          if [ -n "$USE_WORKER_ASSETS" ] && [ "$USE_WORKER_ASSETS" != "false" ] && [ -d "../frontend/dist" ]; then
-            cat >> wrangler.toml << 'EOF'
 
-[assets]
-directory = "../frontend/dist"
-binding = "ASSETS"
-EOF
-            echo "添加了 assets 配置"
+      - name: Deploy Worker
+        run: |
+          cd worker/
+          
+          # 创建基本的 wrangler.toml
+          echo 'name = "temp-email-worker"' > wrangler.toml
+          echo 'compatibility_date = "2025-12-08"' >> wrangler.toml
+          echo 'main = "src/worker.ts"' >> wrangler.toml
+          
+          # 如果需要添加 assets 配置
+          if [ "${{ secrets.USE_WORKER_ASSETS }}" = "true" ]; then
+            echo '' >> wrangler.toml
+            echo '[assets]' >> wrangler.toml
+            echo 'directory = "../frontend/dist"' >> wrangler.toml
+            echo 'binding = "ASSETS"' >> wrangler.toml
           fi
           
           # 显示配置文件
-          echo "生成的 wrangler.toml:"
-          echo "========================================"
+          echo "=== wrangler.toml 内容 ==="
           cat wrangler.toml
-          echo "========================================"
+          echo "========================"
           
-          # 验证文件是否存在
-          echo "验证文件:"
-          echo "入口文件: $MAIN_FILE - $( [ -f "$MAIN_FILE" ] && echo "✅ 存在" || echo "❌ 不存在" )"
-          if [ -n "$USE_WORKER_ASSETS" ] && [ "$USE_WORKER_ASSETS" != "false" ]; then
-            echo "Assets 目录: ../frontend/dist - $( [ -d "../frontend/dist" ] && echo "✅ 存在" || echo "❌ 不存在" )"
-          fi
-          
-          # 4. 安装依赖
-          echo "=== 安装依赖 ==="
+          # 安装依赖
           pnpm install --no-frozen-lockfile
           
-          # 5. 安装邮件解析器（可选）
-          USE_MAIL_WASM_PARSER="${{ secrets.BACKEND_USE_MAIL_WASM_PARSER }}"
-          if [ -n "$USE_MAIL_WASM_PARSER" ] && [ "$USE_MAIL_WASM_PARSER" != "false" ]; then
-            echo "安装 mail-parser-wasm-worker..."
-            pnpm add mail-parser-wasm-worker || echo "安装失败，继续..."
+          # 可选安装邮件解析器
+          if [ "${{ secrets.BACKEND_USE_MAIL_WASM_PARSER }}" = "true" ]; then
+            pnpm add mail-parser-wasm-worker
           fi
           
-          # 6. 验证 wrangler 配置
-          echo "=== 验证配置 ==="
-          npx wrangler --version
+          # 部署
+          npx wrangler deploy --minify
           
-          # 7. 执行部署
-          echo "=== 执行部署 ==="
-          
-          # 方法1：使用 wrangler.toml
-          echo "方法1：使用 wrangler.toml 配置部署"
-          if npx wrangler deploy --minify; then
-            echo "✅ 部署成功！"
-          else
-            echo "❌ 方法1失败，尝试方法2"
-            
-            # 方法2：直接指定参数
-            echo ""
-            echo "方法2：直接指定参数部署"
-            if [ -n "$USE_WORKER_ASSETS" ] && [ "$USE_WORKER_ASSETS" != "false" ] && [ -d "../frontend/dist" ]; then
-              npx wrangler deploy "$MAIN_FILE" \
-                --name "temp-email-worker" \
-                --compatibility-date "$(date +%Y-%m-%d)" \
-                --assets "../frontend/dist" \
-                --assets-binding "ASSETS" \
-                --minify
-            else
-              npx wrangler deploy "$MAIN_FILE" \
-                --name "temp-email-worker" \
-                --compatibility-date "$(date +%Y-%m-%d)" \
-                --minify
-            fi
-          fi
-          
-          echo "🎉 部署完成！"
+          echo "✅ 部署成功完成！"
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
