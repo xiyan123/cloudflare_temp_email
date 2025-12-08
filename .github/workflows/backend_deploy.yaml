@@ -31,33 +31,94 @@ jobs:
 
       - name: Deploy Backend for ${{ github.ref_name }}
         run: |
+          set -e
+          
+          echo "=== 开始部署流程 ==="
+          
           # 设置环境变量
           export use_worker_assets=${{ secrets.USE_WORKER_ASSETS }}
           export use_worker_assets_with_telegram=${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}
           export debug_mode=${{ secrets.DEBUG_MODE }}
           export use_mail_wasm_parser=${{ secrets.BACKEND_USE_MAIL_WASM_PARSER }}
           
+          echo "配置参数:"
+          echo "  USE_WORKER_ASSETS: $use_worker_assets"
+          echo "  USE_WORKER_ASSETS_WITH_TELEGRAM: $use_worker_assets_with_telegram"
+          
           # 1. 构建前端资源（如果需要）
           if [ -n "$use_worker_assets" ]; then
             echo "=== 构建前端资源 ==="
             cd frontend/
+            
+            echo "安装前端依赖..."
             pnpm install --no-frozen-lockfile
+            
+            echo "检查构建脚本..."
             if [ -n "$use_worker_assets_with_telegram" ]; then
-              echo "Building with telegram pages"
+              echo "构建 Telegram 页面..."
               pnpm build:telegram:pages
             else
-              echo "Building with normal pages"
+              echo "构建普通页面..."
               pnpm build:pages
             fi
+            
+            # 验证 dist 目录是否创建
+            echo "验证构建输出..."
+            if [ -d "dist" ]; then
+              echo "✅ dist 目录存在"
+              echo "dist 目录内容:"
+              ls -la dist/
+            else
+              echo "❌ 错误：dist 目录不存在"
+              echo "当前目录内容:"
+              ls -la
+              echo "尝试查找其他输出目录..."
+              find . -type d -name "*dist*" -o -name "*build*" -o -name "*out*"
+              exit 1
+            fi
+            
             cd ..
+          else
+            echo "跳过前端构建"
+            # 如果不需要前端资源，需要修改配置
           fi
           
           # 2. 部署后端 Worker
           echo "=== 部署后端 Worker ==="
           cd worker/
           
-          # 创建 wrangler.toml
-          echo '${{ secrets.BACKEND_TOML }}' > wrangler.toml
+          # 创建 wrangler.toml - 根据是否需要前端资源调整
+          if [ -n "$use_worker_assets" ]; then
+            # 需要前端资源的情况
+            echo "创建带 assets 配置的 wrangler.toml"
+            echo '${{ secrets.BACKEND_TOML }}' > wrangler.toml
+          else
+            # 不需要前端资源的情况
+            echo "创建不带 assets 配置的 wrangler.toml"
+            echo '${{ secrets.BACKEND_TOML_NO_ASSETS }}' > wrangler.toml
+          fi
+          
+          # 验证配置文件
+          if [ ! -f "wrangler.toml" ]; then
+            echo "错误：wrangler.toml 文件创建失败"
+            exit 1
+          fi
+          
+          echo "配置文件内容:"
+          cat wrangler.toml
+          
+          # 检查前端 dist 目录是否存在（如果需要）
+          if grep -q "assets" wrangler.toml; then
+            echo "配置中包含 assets，检查前端目录..."
+            DIST_PATH="../frontend/dist"
+            if [ ! -d "$DIST_PATH" ]; then
+              echo "❌ 错误：前端 dist 目录不存在: $DIST_PATH"
+              echo "请检查前端构建是否成功"
+              exit 1
+            else
+              echo "✅ 前端 dist 目录存在"
+            fi
+          fi
           
           # 安装依赖
           echo "安装后端依赖..."
@@ -72,37 +133,35 @@ jobs:
             PATCH_FILE="../.github/config/mail-parser-wasm-worker.patch"
             if [ -f "$PATCH_FILE" ]; then
               echo "应用补丁..."
-              # 使用 patch 命令，更可靠
+              # 使用 patch 命令
               if command -v patch &> /dev/null || (sudo apt-get update && sudo apt-get install -y patch); then
                 patch -p1 < "$PATCH_FILE" 2>/dev/null || echo "补丁应用可能失败，继续..."
               fi
             fi
           fi
           
-          # 4. 执行部署 - 修复 wrangler 命令问题
+          # 4. 执行部署
           echo "=== 执行部署 ==="
           
-          # 方法1：使用 npm 脚本（如果 package.json 中有 deploy 脚本）
-          echo "检查 package.json 部署脚本..."
-          if grep -q '"deploy"' package.json; then
-            echo "使用 package.json 中的 deploy 脚本"
-            pnpm run deploy
+          # 检查 wrangler 配置
+          echo "检查 wrangler 配置..."
+          if [ -f "node_modules/.bin/wrangler" ]; then
+            chmod +x node_modules/.bin/wrangler
+            ./node_modules/.bin/wrangler --version
           else
-            # 方法2：直接执行 wrangler
-            echo "直接执行 wrangler..."
-            
-            # 确保 wrangler 可执行
-            if [ -f "node_modules/.bin/wrangler" ]; then
-              echo "使用本地安装的 wrangler"
-              chmod +x node_modules/.bin/wrangler
-              ./node_modules/.bin/wrangler deploy --minify
-            else
-              # 方法3：使用 npx
-              echo "使用 npx 执行 wrangler"
-              npx wrangler deploy --minify
-            fi
+            npx wrangler --version
           fi
           
+          echo "开始部署到 Cloudflare..."
+          
+          # 使用适当的部署命令
+          if [ -f "node_modules/.bin/wrangler" ]; then
+            ./node_modules/.bin/wrangler deploy --minify
+          else
+            npx wrangler deploy --minify
+          fi
+          
+          echo "✅ 部署成功！"
           echo "Deployed for tag ${{ github.ref_name }}"
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
