@@ -25,22 +25,89 @@ jobs:
 
       - uses: pnpm/action-setup@v3
         name: Install pnpm
-        id: pnpm-install
         with:
           version: 8
-          run_install: false
 
-      - name: Deploy Backend for ${{ github.ref_name }}
+      - name: Verify Cloudflare Access
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          export use_worker_assets=${{ secrets.USE_WORKER_ASSETS }}
-          export use_worker_assets_with_telegram=${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}
-          echo "Account ID length: ${#CLOUDFLARE_ACCOUNT_ID}"
-          echo "Token length: ${#CLOUDFLARE_API_TOKEN}"
-          npx wrangler whoami
-          if [ -n "$use_worker_assets" ]; then
+          npx wrangler@latest whoami
+          echo "Account ID: ${CLOUDFLARE_ACCOUNT_ID}"
+
+      - name: Setup Cloudflare Resources
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          KV_EMAILS_ID: ${{ secrets.KV_EMAILS_ID }}
+          KV_DOMAINS_ID: ${{ secrets.KV_DOMAINS_ID }}
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+        run: |
+          # 创建或使用现有的资源
+          if [ -z "$KV_EMAILS_ID" ]; then
+            echo "Creating new KV namespace for EMAILS"
+            KV_EMAILS_ID=$(npx wrangler kv:namespace create "EMAILS" --preview | grep -oP 'id = "\K[^"]+')
+            echo "KV_EMAILS_ID=$KV_EMAILS_ID" >> $GITHUB_ENV
+          fi
+          
+          if [ -z "$KV_DOMAINS_ID" ]; then
+            echo "Creating new KV namespace for DOMAINS"
+            KV_DOMAINS_ID=$(npx wrangler kv:namespace create "DOMAINS" --preview | grep -oP 'id = "\K[^"]+')
+            echo "KV_DOMAINS_ID=$KV_DOMAINS_ID" >> $GITHUB_ENV
+          fi
+          
+          if [ -z "$D1_DATABASE_ID" ]; then
+            echo "Creating new D1 database"
+            D1_DATABASE_ID=$(npx wrangler d1 create "temp-mail-db" | grep -oP 'database_id = "\K[^"]+')
+            echo "D1_DATABASE_ID=$D1_DATABASE_ID" >> $GITHUB_ENV
+          fi
+
+      - name: Create wrangler.toml
+        env:
+          KV_EMAILS_ID: ${{ secrets.KV_EMAILS_ID || env.KV_EMAILS_ID }}
+          KV_DOMAINS_ID: ${{ secrets.KV_DOMAINS_ID || env.KV_DOMAINS_ID }}
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID || env.D1_DATABASE_ID }}
+        run: |
+          cd worker/
+          cat > wrangler.toml << EOF
+          name = "temp-mail-worker"
+          compatibility_date = "2024-01-01"
+          compatibility_flags = ["nodejs_compat"]
+          
+          kv_namespaces = [
+            { binding = "EMAILS", id = "${KV_EMAILS_ID}" },
+            { binding = "DOMAINS", id = "${KV_DOMAINS_ID}" }
+          ]
+          
+          r2_buckets = [
+            { binding = "ATTACHMENTS", bucket_name = "attachments" }
+          ]
+          
+          [[d1_databases]]
+          binding = "DB"
+          database_name = "temp-mail-db"
+          database_id = "${D1_DATABASE_ID}"
+          EOF
+          
+          echo "Generated wrangler.toml:"
+          cat wrangler.toml
+
+      - name: Deploy Backend
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          USE_WORKER_ASSETS: ${{ secrets.USE_WORKER_ASSETS }}
+          USE_WORKER_ASSETS_WITH_TELEGRAM: ${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}
+          DEBUG_MODE: ${{ secrets.DEBUG_MODE }}
+          BACKEND_USE_MAIL_WASM_PARSER: ${{ secrets.BACKEND_USE_MAIL_WASM_PARSER }}
+        run: |
+          set -x  # 启用调试输出
+          
+          if [ -n "$USE_WORKER_ASSETS" ]; then
             cd frontend/
             pnpm install --no-frozen-lockfile
-            if [ -n "$use_worker_assets_with_telegram" ]; then
+            if [ -n "$USE_WORKER_ASSETS_WITH_TELEGRAM" ]; then
               echo "Building with telegram pages"
               pnpm build:telegram:pages
             else
@@ -50,30 +117,29 @@ jobs:
             cd ..
           fi
 
-          export debug_mode=${{ secrets.DEBUG_MODE }}
-          export use_mail_wasm_parser=${{ secrets.BACKEND_USE_MAIL_WASM_PARSER }}
           cd worker/
-          echo '${{ secrets.BACKEND_TOML }}' > wrangler.toml
+          echo "Installing dependencies..."
           pnpm install --no-frozen-lockfile
 
-          if [ -n "$use_mail_wasm_parser" ]; then
+          if [ -n "$BACKEND_USE_MAIL_WASM_PARSER" ]; then
             echo "Using mail-parser-wasm-worker"
             pnpm add mail-parser-wasm-worker
             git apply ../.github/config/mail-parser-wasm-worker.patch
             echo "Applied mail-parser-wasm-worker patch"
           fi
 
-          if [ "$debug_mode" = "true" ]; then
+          echo "Starting deployment..."
+          if [ "$DEBUG_MODE" = "true" ]; then
             pnpm run deploy
           else
-            output=$(pnpm run deploy 2>&1)
-            if [ $? -ne 0 ]; then
-                code=$?
-                echo "Command failed with exit code $code"
-                exit $code
+            # 尝试部署并捕获详细输出
+            pnpm run deploy 2>&1 | tee deploy.log
+            DEPLOY_EXIT_CODE=${PIPESTATUS[0]}
+            if [ $DEPLOY_EXIT_CODE -ne 0 ]; then
+              echo "Deployment failed with exit code $DEPLOY_EXIT_CODE"
+              echo "=== Last 100 lines of deploy.log ==="
+              tail -100 deploy.log
+              exit $DEPLOY_EXIT_CODE
             fi
           fi
-          echo "Deployed for tag ${{ github.ref_name }}"
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          echo "Successfully deployed for ref: ${{ github.ref_name }}"
