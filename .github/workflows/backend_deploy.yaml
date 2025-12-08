@@ -47,13 +47,13 @@ jobs:
           # 创建或使用现有的资源
           if [ -z "$KV_EMAILS_ID" ]; then
             echo "Creating new KV namespace for EMAILS"
-            KV_EMAILS_ID=$(npx wrangler kv namespace create "EMAILS" --preview | grep -oP 'id = "\K[^"]+')
+            KV_EMAILS_ID=$(npx wrangler kv namespace create "EMAILS" | grep -oP 'id = "\K[^"]+')
             echo "KV_EMAILS_ID=$KV_EMAILS_ID" >> $GITHUB_ENV
           fi
           
           if [ -z "$KV_DOMAINS_ID" ]; then
             echo "Creating new KV namespace for DOMAINS"
-            KV_DOMAINS_ID=$(npx wrangler kv namespace create "DOMAINS" --preview | grep -oP 'id = "\K[^"]+')
+            KV_DOMAINS_ID=$(npx wrangler kv namespace create "DOMAINS" | grep -oP 'id = "\K[^"]+')
             echo "KV_DOMAINS_ID=$KV_DOMAINS_ID" >> $GITHUB_ENV
           fi
           
