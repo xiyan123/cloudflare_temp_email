@@ -98,6 +98,13 @@ jobs:
           echo "安装后端依赖..."
           pnpm install --no-frozen-lockfile
           
+          # 检查 wrangler 是否安装成功
+          echo "检查 wrangler 安装..."
+          if [ ! -f "node_modules/.bin/wrangler" ]; then
+            echo "警告：wrangler 可执行文件不存在，尝试重新安装"
+            pnpm add -D wrangler
+          fi
+          
           # 3. 可选的邮件解析器安装
           if [ -n "$use_mail_wasm_parser" ]; then
             echo "=== 安装邮件解析器 ==="
@@ -161,49 +168,67 @@ jobs:
             cat package.json | grep -A10 '"scripts"'
           fi
           
+          echo "检查 node_modules/.bin 目录:"
+          ls -la node_modules/.bin/ | grep wrangler || echo "wrangler 不在 .bin 目录"
+          
+          # 修复：使用 npx 或 pnpm exec 执行 wrangler
           echo "执行部署命令..."
+          
+          # 创建日志文件
+          LOG_FILE="deploy_$(date +%Y%m%d_%H%M%S).log"
+          
           if [ "$debug_mode" = "true" ]; then
-            echo "调试模式：直接执行部署"
-            pnpm run deploy
-            DEPLOY_EXIT_CODE=$?
+            echo "调试模式：显示完整输出"
+            echo "开始部署..." > "$LOG_FILE"
+            
+            # 方法1：使用 npx
+            echo "使用 npx 执行 wrangler..."
+            npx wrangler deploy --minify 2>&1 | tee -a "$LOG_FILE"
+            DEPLOY_EXIT_CODE=${PIPESTATUS[0]}
           else
             echo "正常模式：捕获部署输出"
-            
-            # 创建日志文件
-            LOG_FILE="deploy_$(date +%Y%m%d_%H%M%S).log"
-            
-            # 执行部署并记录日志
             echo "开始部署..." > "$LOG_FILE"
-            pnpm run deploy 2>&1 | tee -a "$LOG_FILE"
+            
+            # 方法2：使用 pnpm exec（如果 npx 不可用）
+            echo "使用 pnpm exec 执行 wrangler..."
+            pnpm exec wrangler deploy --minify 2>&1 | tee -a "$LOG_FILE"
             DEPLOY_EXIT_CODE=${PIPESTATUS[0]}
-            
-            echo "部署退出码: $DEPLOY_EXIT_CODE" >> "$LOG_FILE"
-            
-            if [ $DEPLOY_EXIT_CODE -eq 0 ]; then
-              echo "部署成功！"
-              echo "最后10行输出:"
-              tail -10 "$LOG_FILE"
-            else
-              echo "部署失败，退出码: $DEPLOY_EXIT_CODE"
-              echo "错误详情（最后50行）:"
-              tail -50 "$LOG_FILE"
-              
-              echo "完整的错误日志已保存到: $LOG_FILE"
-              echo "=== 错误日志开始 ==="
-              cat "$LOG_FILE"
-              echo "=== 错误日志结束 ==="
-              
-              # 检查 Cloudflare 认证
-              echo "检查环境变量:"
-              echo "CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:0:10}..."
-              echo "CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:0:10}..."
-              
-              exit $DEPLOY_EXIT_CODE
-            fi
           fi
           
-          echo "=== 部署完成 ==="
-          echo "成功部署标签: ${{ github.ref_name }}"
+          echo "部署退出码: $DEPLOY_EXIT_CODE" >> "$LOG_FILE"
+          
+          if [ $DEPLOY_EXIT_CODE -eq 0 ]; then
+            echo "部署成功！"
+            echo "最后10行输出:"
+            tail -10 "$LOG_FILE"
+            echo "=== 部署完成 ==="
+            echo "成功部署标签: ${{ github.ref_name }}"
+          else
+            echo "部署失败，退出码: $DEPLOY_EXIT_CODE"
+            echo "错误详情（最后50行）:"
+            tail -50 "$LOG_FILE"
+            
+            echo "完整的错误日志已保存到: $LOG_FILE"
+            echo "=== 错误诊断 ==="
+            
+            # 检查可用的 wrangler 执行方式
+            echo "1. 检查 npx 版本:"
+            npx --version || echo "npx 不可用"
+            
+            echo "2. 检查 pnpm exec:"
+            pnpm exec -- echo "pnpm exec 可用" || echo "pnpm exec 不可用"
+            
+            echo "3. 检查直接路径:"
+            if [ -f "node_modules/.bin/wrangler" ]; then
+              echo "尝试直接执行:"
+              ./node_modules/.bin/wrangler --version || echo "直接执行失败"
+            fi
+            
+            echo "4. 检查全局安装:"
+            which wrangler || echo "wrangler 未全局安装"
+            
+            exit $DEPLOY_EXIT_CODE
+          fi
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
