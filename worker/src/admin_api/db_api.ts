@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS raw_mails (
     source TEXT,
     address TEXT,
     raw TEXT,
+    raw_blob BLOB,
     metadata TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -17,10 +18,13 @@ CREATE INDEX IF NOT EXISTS idx_raw_mails_address ON raw_mails(address);
 
 CREATE INDEX IF NOT EXISTS idx_raw_mails_created_at ON raw_mails(created_at);
 
+CREATE INDEX IF NOT EXISTS idx_raw_mails_message_id ON raw_mails(message_id);
+
 CREATE TABLE IF NOT EXISTS address (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE,
     password TEXT,
+    source_meta TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -30,6 +34,8 @@ CREATE INDEX IF NOT EXISTS idx_address_name ON address(name);
 CREATE INDEX IF NOT EXISTS idx_address_created_at ON address(created_at);
 
 CREATE INDEX IF NOT EXISTS idx_address_updated_at ON address(updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_address_source_meta ON address(source_meta);
 
 CREATE TABLE IF NOT EXISTS auto_reply_mails (
     id INTEGER PRIMARY KEY,
@@ -138,14 +144,58 @@ export default {
     },
     migrate: async (c: Context<HonoCustomType>) => {
         const version = await utils.getSetting(c, CONSTANTS.DB_VERSION_KEY);
-        if (version == "v0.0.2") {
-            // example migration from v0.0.2 to v0.0.3
-            const query = `ALTER TABLE address ADD password TEXT;`
-            await c.env.DB.exec(query);
+        if (version && version <= "v0.0.2") {
+            // migration to v0.0.3: add password column
+            const tableInfo = await c.env.DB.prepare(
+                `PRAGMA table_info(address)`
+            ).all();
+            const hasPassword = tableInfo.results?.some(
+                (col: any) => col.name === 'password'
+            );
+            if (!hasPassword) {
+                await c.env.DB.exec(`ALTER TABLE address ADD COLUMN password TEXT;`);
+            }
         }
-        if (version == "v0.0.3") {
-            // migration from v0.0.3 to v0.0.4
-            await c.env.DB.exec(`ALTER TABLE raw_mails ADD COLUMN metadata TEXT;`);
+        if (version && version <= "v0.0.3") {
+            // migration to v0.0.4: add metadata column
+            const tableInfo = await c.env.DB.prepare(
+                `PRAGMA table_info(raw_mails)`
+            ).all();
+            const hasMetadata = tableInfo.results?.some(
+                (col: any) => col.name === 'metadata'
+            );
+            if (!hasMetadata) {
+                await c.env.DB.exec(`ALTER TABLE raw_mails ADD COLUMN metadata TEXT;`);
+            }
+        }
+        if (version && version <= "v0.0.4") {
+            // migration to v0.0.5: add source_meta column
+            const tableInfo = await c.env.DB.prepare(
+                `PRAGMA table_info(address)`
+            ).all();
+            const hasSourceMeta = tableInfo.results?.some(
+                (col: any) => col.name === 'source_meta'
+            );
+            if (!hasSourceMeta) {
+                await c.env.DB.exec(`ALTER TABLE address ADD COLUMN source_meta TEXT;`);
+                await c.env.DB.exec(`CREATE INDEX IF NOT EXISTS idx_address_source_meta ON address(source_meta);`);
+            }
+        }
+        if (version && version <= "v0.0.5") {
+            // migration to v0.0.6: add message_id index on raw_mails
+            await c.env.DB.exec(`CREATE INDEX IF NOT EXISTS idx_raw_mails_message_id ON raw_mails(message_id);`);
+        }
+        if (version && version <= "v0.0.6") {
+            // migration to v0.0.7: add raw_blob column for gzip compressed email storage
+            const tableInfo = await c.env.DB.prepare(
+                `PRAGMA table_info(raw_mails)`
+            ).all();
+            const hasRawBlob = tableInfo.results?.some(
+                (col: any) => col.name === 'raw_blob'
+            );
+            if (!hasRawBlob) {
+                await c.env.DB.exec(`ALTER TABLE raw_mails ADD COLUMN raw_blob BLOB;`);
+            }
         }
         if (version != CONSTANTS.DB_VERSION) {
             // remove all \r and \n characters from the query string

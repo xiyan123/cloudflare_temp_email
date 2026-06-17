@@ -1,14 +1,13 @@
 import { Context } from 'hono';
 import i18n from '../i18n';
-import { getBooleanValue, hashPassword } from '../utils';
+import utils, { getBooleanValue, hashPassword, checkCfTurnstile } from '../utils';
 import { Jwt } from 'hono/utils/jwt';
 
 export default {
     // 修改地址密码
     changePassword: async (c: Context<HonoCustomType>) => {
         const { new_password } = await c.req.json();
-        const lang = c.get("lang") || c.env.DEFAULT_LANG;
-        const msgs = i18n.getMessages(lang);
+        const msgs = i18n.getMessagesbyContext(c);
         const { address, address_id } = c.get("jwtPayload");
 
         // 检查功能是否启用
@@ -24,7 +23,7 @@ export default {
             return c.text(msgs.InvalidAddressTokenMsg, 400);
         }
 
-        // 更新密码
+        // NOTE: new_password is the frontend SHA-256 hash, stored directly in address.password.
         const { success } = await c.env.DB.prepare(
             `UPDATE address SET password = ?, updated_at = datetime('now') WHERE id = ?`
         ).bind(new_password, address_id).run();
@@ -39,8 +38,7 @@ export default {
     // 地址密码登录
     login: async (c: Context<HonoCustomType>) => {
         const { email, password, cf_token } = await c.req.json();
-        const lang = c.get("lang") || c.env.DEFAULT_LANG;
-        const msgs = i18n.getMessages(lang);
+        const msgs = i18n.getMessagesbyContext(c);
 
         // 检查功能是否启用
         if (!getBooleanValue(c.env.ENABLE_ADDRESS_PASSWORD)) {
@@ -49,6 +47,15 @@ export default {
 
         if (!email || !password) {
             return c.text(msgs.EmailPasswordRequiredMsg, 400);
+        }
+
+        // check cf turnstile if global turnstile is enabled
+        if (utils.isGlobalTurnstileEnabled(c)) {
+            try {
+                await checkCfTurnstile(c, cf_token);
+            } catch (error) {
+                return c.text(msgs.TurnstileCheckFailedMsg, 400)
+            }
         }
 
         // 查找地址
@@ -60,7 +67,7 @@ export default {
             return c.text(msgs.AddressNotFoundMsg, 404);
         }
 
-        // 验证密码
+        // NOTE: password is the frontend SHA-256 hash, compared directly with address.password.
         if (address.password !== password) {
             return c.text(msgs.InvalidEmailOrPasswordMsg, 401);
         }
