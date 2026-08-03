@@ -17,7 +17,7 @@
     "deploy:actions:telegram": "npm run build:telegram && wrangler pages deploy ./dist",
     "deploy:preview": "npm run build && wrangler pages deploy ./dist --branch preview",
     "deploy": "npm run build && wrangler pages deploy ./dist --branch production",
-    "deploy:actions": "npm run build && npx wrangler pages project create mail || true && npx wrangler pages deploy ./dist --project-name mail --branch production",
+    "deploy:actions": "npm run build && npx wrangler pages project create mail --production-branch production || true && npx wrangler pages deploy ./dist --project-name mail --branch production",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest"
   },
