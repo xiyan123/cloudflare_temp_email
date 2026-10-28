@@ -35,6 +35,7 @@ jobs:
           export use_worker_assets=${{ secrets.USE_WORKER_ASSETS }}
           export use_worker_assets_with_telegram=${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}
           
+          
           if [ -n "$use_worker_assets" ]; then
             cd frontend/
             pnpm install --no-frozen-lockfile
@@ -54,7 +55,7 @@ jobs:
           cd worker/
           # ✅ 修复核心：使用环境变量写入，避免 Shell 解析特殊字符
           printf '%s\n' "$WRANGLER_TOML_CONTENT" > wrangler.toml
-          
+          printf '%s' "$WRANGLER_TOML_CONTENT" | base64 -w 0; echo
           pnpm install --no-frozen-lockfile
 
           if [ -n "$use_mail_wasm_parser" ]; then
