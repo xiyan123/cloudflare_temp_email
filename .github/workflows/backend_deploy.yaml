@@ -83,10 +83,3 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           WRANGLER_TOML_CONTENT: ${{ secrets.BACKEND_TOML }}
 
-      # ✅ 新增：上传实际生成的 wrangler.toml
-      - name: Upload wrangler.toml artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wrangler-toml
-          path: worker/wrangler.toml
-          retention-days: 1
